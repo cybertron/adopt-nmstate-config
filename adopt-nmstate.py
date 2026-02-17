@@ -17,9 +17,12 @@
 # Generate NodeNetworkConfigurationPolicy files for all of the machine-configs
 # that contain NMState day one configurations.
 
+# Usage: Set KUBECONFIG for access to the cluster, then run this script.
+# It will collect all machine-configs containing NMState config and generate
+# NNCPs from them.
+
 # TODO:
-# - Handle "default" capture config
-# - Test if address append works with DHCP
+# - Handle capture configs
 
 import base64
 import ipaddress
