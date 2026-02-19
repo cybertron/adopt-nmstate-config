@@ -23,6 +23,7 @@
 
 # TODO:
 # - Handle capture configs
+# - Write files
 
 import base64
 import ipaddress
@@ -79,8 +80,25 @@ def modify_config(f):
                 interface['ipv6']['address'].append(masqv6)
     return config
 
+def is_fqdn(hostname):
+    if hostname == 'cluster':
+        return False
+    nodes = oc.selector('nodes').qnames()
+    # Strip off the node/ prefix
+    nodes = [n[5:] for n in nodes]
+    if hostname in nodes:
+        return False
+    return True
+
+def domain_name():
+    return oc.selector('dns').object().model.spec.baseDomain
+
 def create_nncp(updated, path, mc):
     hostname = os.path.splitext(os.path.basename(path))[0]
+    # If the cluster is using FQDNs we need to reflect that in the node selector
+    if is_fqdn(hostname):
+        domain = domain_name()
+        hostname = f'{hostname}.{domain}'
     selector = f'kubernetes.io/hostname: {hostname}'
     # The magic hostname of 'cluster' means to apply the config to every node in the role
     if hostname == 'cluster':
