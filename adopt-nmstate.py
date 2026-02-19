@@ -23,8 +23,8 @@
 
 # TODO:
 # - Handle capture configs
-# - Write files
 
+import argparse
 import base64
 import ipaddress
 import os
@@ -93,7 +93,7 @@ def is_fqdn(hostname):
 def domain_name():
     return oc.selector('dns').object().model.spec.baseDomain
 
-def create_nncp(updated, path, mc):
+def create_nncp(updated, path, mc, output_dir):
     hostname = os.path.splitext(os.path.basename(path))[0]
     # If the cluster is using FQDNs we need to reflect that in the node selector
     if is_fqdn(hostname):
@@ -105,9 +105,23 @@ def create_nncp(updated, path, mc):
         role = mc.model.metadata.labels['machineconfiguration.openshift.io/role']
         selector = f'node-role.kubernetes.io/{role}: ""'
         hostname = role
-    print(f'{hostname}.yaml')
-    print('-' * (len(hostname) + 5))
-    print(nncp_template(hostname, textwrap.indent(yaml.dump(updated), '    '), selector))
+    content = nncp_template(hostname, textwrap.indent(yaml.dump(updated), '    '), selector)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, f'{hostname}.yaml')
+        with open(output_path, 'w') as out:
+            out.write(content)
+        print(f'Wrote {output_path}')
+    else:
+        print(f'{hostname}.yaml')
+        print('-' * (len(hostname) + 5))
+        print(content)
+
+parser = argparse.ArgumentParser(
+    description='Generate NodeNetworkConfigurationPolicy files from NMState machine-configs.')
+parser.add_argument('-o', '--output-dir', metavar='DIR',
+                    help='Directory to write output files to. If not specified, output is printed to stdout.')
+args = parser.parse_args()
 
 with oc.project('openshift-machine-config-operator'):
     for mc in oc.selector('machineconfigs').objects():
@@ -117,6 +131,6 @@ with oc.project('openshift-machine-config-operator'):
             if f.path.startswith('/etc/nmstate/openshift'):
                 if f.contents.source.startswith(base64_prefix):
                     updated = modify_config(f)
-                    create_nncp(updated, f.path, mc)
+                    create_nncp(updated, f.path, mc, args.output_dir)
 
 
