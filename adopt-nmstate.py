@@ -29,11 +29,13 @@ import base64
 import ipaddress
 import os
 import textwrap
+import urllib.parse
 import yaml
 
 import openshift_client as oc
 
 base64_prefix = 'data:text/plain;charset=utf-8;base64,'
+text_prefix = 'data:,'
 
 nncp_template = lambda hostname, updated, selector: f'''apiVersion: nmstate.io/v1
 kind: NodeNetworkConfigurationPolicy
@@ -42,46 +44,54 @@ metadata:
 spec:
   nodeSelector:
     {selector}
-  desiredState:
 {updated}
 '''
 
 def modify_config(f):
-    encoded = f.contents.source[len(base64_prefix):]
-    decoded = base64.b64decode(encoded).decode('utf-8')
+    nmpolicy = False
+    if f.contents.source.startswith(base64_prefix):
+        encoded = f.contents.source[len(base64_prefix):]
+        decoded = base64.b64decode(encoded).decode('utf-8')
+    else:
+        encoded = f.contents.source[len(text_prefix):]
+        decoded = urllib.parse.unquote(encoded)
+        nmpolicy = True
     config = yaml.safe_load(decoded)
     networks = oc.selector('networks.operator.openshift.io').object()
 
-    cidrv4 = '169.254.0.0/17'
-    if networks.model.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.ipv4:
-        cidrv4 = networks.model.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.ipv4.internalMasqueradeSubnet
-    netv4 = ipaddress.ip_network(cidrv4, strict=False)
-    addrv4 = str(list(netv4.hosts())[1])
-    maskv4 = netv4.prefixlen
+    # When using nmpolicy we can't add masquerade addresses
+    if not nmpolicy:
+        cidrv4 = '169.254.0.0/17'
+        if networks.model.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.ipv4:
+            cidrv4 = networks.model.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.ipv4.internalMasqueradeSubnet
+        netv4 = ipaddress.ip_network(cidrv4, strict=False)
+        addrv4 = str(list(netv4.hosts())[1])
+        maskv4 = netv4.prefixlen
 
-    cidrv6 = 'fd69::/112'
-    if networks.model.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.ipv6:
-        cidrv6 = networks.model.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.ipv6.internalMasqueradeSubnet
-    netv6 = ipaddress.ip_network(cidrv6, strict=False)
-    addrv6 = str(list(netv6.hosts())[1])
-    maskv6= netv6.prefixlen
+        cidrv6 = 'fd69::/112'
+        if networks.model.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.ipv6:
+            cidrv6 = networks.model.spec.defaultNetwork.ovnKubernetesConfig.gatewayConfig.ipv6.internalMasqueradeSubnet
+        netv6 = ipaddress.ip_network(cidrv6, strict=False)
+        addrv6 = str(list(netv6.hosts())[1])
+        maskv6= netv6.prefixlen
 
-    masqv4 = {'ip': addrv4, 'prefix-length': int(maskv4)}
-    masqv6 = {'ip': addrv6, 'prefix-length': int(maskv6)}
-    for interface in config['interfaces']:
-        if interface['name'] == 'br-ex' and interface['type'] == 'ovs-interface':
-            if interface['ipv4']['enabled']:
-                if not 'address' in interface['ipv4']:
-                    interface['ipv4']['address'] = []
-                interface['ipv4']['address'].append(masqv4)
-            if interface['ipv6']['enabled']:
-                if not 'address' in interface['ipv6']:
-                    interface['ipv6']['address'] = []
-                interface['ipv6']['address'].append(masqv6)
+        masqv4 = {'ip': addrv4, 'prefix-length': int(maskv4)}
+        masqv6 = {'ip': addrv6, 'prefix-length': int(maskv6)}
+        for interface in config['interfaces']:
+            if interface['name'] == 'br-ex' and interface['type'] == 'ovs-interface':
+                if interface['ipv4']['enabled']:
+                    if not 'address' in interface['ipv4']:
+                        interface['ipv4']['address'] = []
+                    interface['ipv4']['address'].append(masqv4)
+                if interface['ipv6']['enabled']:
+                    if not 'address' in interface['ipv6']:
+                        interface['ipv6']['address'] = []
+                    interface['ipv6']['address'].append(masqv6)
+        config = {'desiredState': config}
     return config
 
 def is_fqdn(hostname):
-    if hostname == 'cluster':
+    if hostname == 'cluster' or hostname == 'default':
         return False
     nodes = oc.selector('nodes').qnames()
     # Strip off the node/ prefix
@@ -105,7 +115,13 @@ def create_nncp(updated, path, mc, output_dir):
         role = mc.model.metadata.labels['machineconfiguration.openshift.io/role']
         selector = f'node-role.kubernetes.io/{role}: ""'
         hostname = role
-    content = nncp_template(hostname, textwrap.indent(yaml.dump(updated), '    '), selector)
+    # TODO: The 'default' name will change and this will need to be updated.
+    if hostname == 'default':
+        role = mc.model.metadata.ownerReferences[0].name
+        print(role)
+        selector = f'node-role.kubernetes.io/{role}: ""'
+        hostname = role
+    content = nncp_template(hostname, textwrap.indent(yaml.dump(updated), '  '), selector)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, f'{hostname}.yaml')
@@ -125,12 +141,11 @@ args = parser.parse_args()
 
 with oc.project('openshift-machine-config-operator'):
     for mc in oc.selector('machineconfigs').objects():
-        if mc.name().startswith('rendered'):
-            continue
+        #if mc.name().startswith('rendered'):
+        #    continue
         for f in mc.model.spec.config.storage.files:
             if f.path.startswith('/etc/nmstate/openshift'):
-                if f.contents.source.startswith(base64_prefix):
-                    updated = modify_config(f)
-                    create_nncp(updated, f.path, mc, args.output_dir)
+                updated = modify_config(f)
+                create_nncp(updated, f.path, mc, args.output_dir)
 
 
